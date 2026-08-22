@@ -178,7 +178,7 @@ impl Default for State {
             license_accepted: false,
             web_server: "nginx".into(),
             http_port: 80,
-            active_php: "8.3".into(),
+            active_php: "8.2".into(),
             tld: "test".into(),
         }
     }

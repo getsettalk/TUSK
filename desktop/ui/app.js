@@ -18,13 +18,16 @@ async function call(cmd, args) {
 // Full-screen spinner + live log for long operations (installs/downloads).
 function busy(msg) {
   $("#busy-msg").textContent = msg || "Working…";
-  $("#busy-log").textContent = "";
+  const el = $("#busy-log"); el.textContent = ""; el._lines = [];
   $("#busy").classList.remove("hidden");
 }
 function idle() { $("#busy").classList.add("hidden"); }
 function busyLog(line) {
   const el = $("#busy-log");
-  el.textContent += line + "\n";
+  el._lines = el._lines || [];
+  el._lines.push(line);
+  if (el._lines.length > 400) el._lines = el._lines.slice(-400); // keep memory bounded
+  el.textContent = el._lines.join("\n");
   el.scrollTop = el.scrollHeight;
 }
 async function withBusy(msg, cmd, args) {

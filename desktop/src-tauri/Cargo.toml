@@ -1,11 +1,11 @@
 [package]
 name = "tusk"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "Chowk — a free, open-source local dev environment for macOS"
+description = "Tusk — a free, open-source local dev environment for macOS"
 authors = ["getsettalk"]
 license = "MIT"
-repository = "https://github.com/getsettalk/chowk"
+repository = "https://github.com/getsettalk/tusk"
 
 # The Tauri app is a plain desktop binary; frontend assets in ../ui are
 # embedded at build time by tauri-build (frontendDist in tauri.conf.json).

@@ -444,14 +444,16 @@ pub fn restart_all() -> Result<String, String> {
     start_all()
 }
 
-/// Which base-stack formulae are still missing (php@active, mariadb, nginx, httpd).
+/// Which base-stack formulae are still missing (php@active, mariadb, nginx).
+/// Apache (httpd) is intentionally NOT part of the base — it's installed
+/// on demand only if the user switches to it, so first-run stays small.
 pub fn base_missing_formulae() -> Vec<String> {
     let state = load_state();
     let mut to_install: Vec<String> = Vec::new();
     if !php::is_installed(&state.active_php) {
         to_install.push(format!("php@{}", state.active_php));
     }
-    for f in ["mariadb", "nginx", "httpd"] {
+    for f in ["mariadb", "nginx"] {
         if !brew_installed(f) {
             to_install.push(f.to_string());
         }

@@ -3,27 +3,66 @@
 
 use crate::engine::{self, php, services, sites};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
 /// Run a shell command and stream its combined output to the frontend as
-/// "install-log" events (so the UI can show a live terminal-style progress).
+/// "install-log" events (live terminal-style progress).
+///
+/// IMPORTANT: reads raw bytes and splits on BOTH `\n` and `\r`. brew/curl draw
+/// progress bars with carriage returns and NO newline; a naive line reader would
+/// buffer the entire download into one ever-growing String (this caused a
+/// multi-GB out-of-memory). Each emitted chunk is length-capped too.
 fn stream_shell(app: &AppHandle, script: &str) -> Result<(), String> {
     let _ = app.emit("install-log", format!("$ {script}"));
-    // Merge stderr into stdout so brew/pecl progress lines all come through.
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(format!("{script} 2>&1"))
+        // Keep Homebrew quiet & non-interactive so it can't stall or auto-update
+        // the whole tap (which itself can be a huge fetch).
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .env("HOMEBREW_NO_ENV_HINTS", "1")
+        .env("HOMEBREW_NO_INSTALL_CLEANUP", "1")
+        .env("NONINTERACTIVE", "1")
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let _ = app.emit("install-log", line);
+
+    if let Some(mut out) = child.stdout.take() {
+        let mut buf = [0u8; 4096];
+        let mut line: Vec<u8> = Vec::with_capacity(256);
+        let flush = |line: &mut Vec<u8>, app: &AppHandle| {
+            if !line.is_empty() {
+                let s = String::from_utf8_lossy(line).trim_end().to_string();
+                if !s.is_empty() {
+                    let _ = app.emit("install-log", s);
+                }
+                line.clear();
+            }
+        };
+        loop {
+            match out.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for &b in &buf[..n] {
+                        if b == b'\n' || b == b'\r' {
+                            flush(&mut line, app);
+                        } else {
+                            line.push(b);
+                            if line.len() > 2000 {
+                                flush(&mut line, app); // cap absurdly long lines
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
         }
+        flush(&mut line, app);
     }
+
     let status = child.wait().map_err(|e| e.to_string())?;
     if status.success() {
         let _ = app.emit("install-log", "✓ done".to_string());
@@ -32,6 +71,17 @@ fn stream_shell(app: &AppHandle, script: &str) -> Result<(), String> {
         let _ = app.emit("install-log", "✗ failed (see output above)".to_string());
         Err("command failed — see log".into())
     }
+}
+
+/// Run blocking work off the UI thread (Tauri sync commands run on the main
+/// thread and would freeze the window). Await the result in an async command.
+async fn run_blocking<F>(f: F) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -84,59 +134,68 @@ pub fn list_services() -> Vec<services::Service> {
     services::list_services()
 }
 #[tauri::command]
-pub fn set_service(key: String, on: bool) -> Result<String, String> {
-    services::set_service(&key, on)
+pub async fn set_service(key: String, on: bool) -> Result<String, String> {
+    run_blocking(move || services::set_service(&key, on)).await
 }
 #[tauri::command]
-pub fn install_service(app: AppHandle, key: String) -> Result<String, String> {
-    // Resolve which brew formula this service needs.
-    let state = engine::load_state();
-    let formula = match key.as_str() {
-        "web" => if state.web_server == "apache" { "httpd".to_string() } else { "nginx".to_string() },
-        "mariadb" => "mariadb".into(),
-        "redis" => "redis".into(),
-        "mailpit" => "mailpit".into(),
-        "php" => format!("php@{}", state.active_php),
-        _ => return Err(format!("no installer for {key}")),
-    };
-    if engine::brew_installed(&formula) {
-        return Ok(format!("{formula} already installed"));
-    }
-    stream_shell(&app, &format!("{} install {}", engine::brew_bin(), formula))?;
-    Ok(format!("{formula} installed"))
+pub async fn install_service(app: AppHandle, key: String) -> Result<String, String> {
+    run_blocking(move || {
+        // Resolve which brew formula this service needs.
+        let state = engine::load_state();
+        let formula = match key.as_str() {
+            "web" => if state.web_server == "apache" { "httpd".to_string() } else { "nginx".to_string() },
+            "mariadb" => "mariadb".into(),
+            "redis" => "redis".into(),
+            "mailpit" => "mailpit".into(),
+            "php" => format!("php@{}", state.active_php),
+            _ => return Err(format!("no installer for {key}")),
+        };
+        if engine::brew_installed(&formula) {
+            return Ok(format!("{formula} already installed"));
+        }
+        stream_shell(&app, &format!("{} install {}", engine::brew_bin(), formula))?;
+        Ok(format!("{formula} installed"))
+    })
+    .await
 }
 #[tauri::command]
-pub fn svc_start() -> Result<String, String> {
-    services::start_all()
+pub async fn svc_start() -> Result<String, String> {
+    run_blocking(services::start_all).await
 }
 #[tauri::command]
-pub fn svc_stop() -> Result<String, String> {
-    services::stop_all()
+pub async fn svc_stop() -> Result<String, String> {
+    run_blocking(services::stop_all).await
 }
 #[tauri::command]
-pub fn svc_restart() -> Result<String, String> {
-    services::restart_all()
+pub async fn svc_restart() -> Result<String, String> {
+    run_blocking(services::restart_all).await
 }
 #[tauri::command]
-pub fn install_base(app: AppHandle) -> Result<String, String> {
-    let missing = services::base_missing_formulae();
-    if missing.is_empty() {
-        return Ok("Base stack already installed".into());
-    }
-    stream_shell(&app, &format!("{} install {}", engine::brew_bin(), missing.join(" ")))?;
-    Ok("Base stack installed".into())
+pub async fn install_base(app: AppHandle) -> Result<String, String> {
+    run_blocking(move || {
+        let missing = services::base_missing_formulae();
+        if missing.is_empty() {
+            return Ok("Base stack already installed".into());
+        }
+        stream_shell(&app, &format!("{} install {}", engine::brew_bin(), missing.join(" ")))?;
+        Ok("Base stack installed".into())
+    })
+    .await
 }
 #[tauri::command]
-pub fn install_apache(app: AppHandle) -> Result<String, String> {
-    if engine::brew_installed("httpd") {
-        return Ok("Apache already installed".into());
-    }
-    stream_shell(&app, &format!("{} install httpd", engine::brew_bin()))?;
-    Ok("Apache installed".into())
+pub async fn install_apache(app: AppHandle) -> Result<String, String> {
+    run_blocking(move || {
+        if engine::brew_installed("httpd") {
+            return Ok("Apache already installed".into());
+        }
+        stream_shell(&app, &format!("{} install httpd", engine::brew_bin()))?;
+        Ok("Apache installed".into())
+    })
+    .await
 }
 #[tauri::command]
-pub fn mariadb_dev_reset_root() -> Result<String, String> {
-    services::dev_reset_root()
+pub async fn mariadb_dev_reset_root() -> Result<String, String> {
+    run_blocking(services::dev_reset_root).await
 }
 
 // ---------------------------------------------------------------------------
@@ -148,20 +207,23 @@ pub fn php_list() -> Vec<php::PhpVersion> {
     php::list()
 }
 #[tauri::command]
-pub fn php_install(app: AppHandle, version: String) -> Result<String, String> {
-    if php::is_installed(&version) {
-        return Ok(format!("php@{version} already installed"));
-    }
-    stream_shell(&app, &format!("{} install php@{}", engine::brew_bin(), version))?;
-    Ok(format!("php@{version} installed"))
+pub async fn php_install(app: AppHandle, version: String) -> Result<String, String> {
+    run_blocking(move || {
+        if php::is_installed(&version) {
+            return Ok(format!("php@{version} already installed"));
+        }
+        stream_shell(&app, &format!("{} install php@{}", engine::brew_bin(), version))?;
+        Ok(format!("php@{version} installed"))
+    })
+    .await
 }
 #[tauri::command]
-pub fn php_uninstall(version: String) -> Result<String, String> {
-    php::uninstall(&version)
+pub async fn php_uninstall(version: String) -> Result<String, String> {
+    run_blocking(move || php::uninstall(&version)).await
 }
 #[tauri::command]
-pub fn php_switch(version: String) -> Result<String, String> {
-    php::switch(&version)
+pub async fn php_switch(version: String) -> Result<String, String> {
+    run_blocking(move || php::switch(&version)).await
 }
 #[tauri::command]
 pub fn php_extensions(version: String) -> Result<Vec<php::Extension>, String> {
@@ -172,23 +234,26 @@ pub fn php_set_extension(version: String, name: String, enable: bool) -> Result<
     php::set_extension(&version, &name, enable)
 }
 #[tauri::command]
-pub fn php_install_extension(app: AppHandle, version: String, name: String) -> Result<String, String> {
-    // Some PECL extensions need system libraries; install those first.
-    let deps: &[&str] = match name.to_lowercase().as_str() {
-        "imagick" => &["pkg-config", "imagemagick"],
-        "mongodb" => &["pkg-config", "openssl@3"],
-        _ => &[],
-    };
-    for d in deps {
-        if !engine::brew_installed(d) {
-            stream_shell(&app, &format!("{} install {}", engine::brew_bin(), d))?;
+pub async fn php_install_extension(app: AppHandle, version: String, name: String) -> Result<String, String> {
+    run_blocking(move || {
+        // Some PECL extensions need system libraries; install those first.
+        let deps: &[&str] = match name.to_lowercase().as_str() {
+            "imagick" => &["pkg-config", "imagemagick"],
+            "mongodb" => &["pkg-config", "openssl@3"],
+            _ => &[],
+        };
+        for d in deps {
+            if !engine::brew_installed(d) {
+                stream_shell(&app, &format!("{} install {}", engine::brew_bin(), d))?;
+            }
         }
-    }
-    // Stream the (slow) PECL build.
-    let pecl = php::pecl_bin(&version);
-    let _ = stream_shell(&app, &format!("yes '' | '{}' install '{}'", pecl, name));
-    // enable_installed_extension verifies the .so built before enabling.
-    php::enable_installed_extension(&version, &name)
+        // Stream the (slow) PECL build.
+        let pecl = php::pecl_bin(&version);
+        let _ = stream_shell(&app, &format!("yes '' | '{}' install '{}'", pecl, name));
+        // enable_installed_extension verifies the .so built before enabling.
+        php::enable_installed_extension(&version, &name)
+    })
+    .await
 }
 #[tauri::command]
 pub fn php_ini_path(version: String) -> String {
@@ -217,24 +282,28 @@ pub fn site_remove(name: String) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn dns_setup() -> Result<String, String> {
-    let brew = engine::brew_prefix();
-    let state = engine::load_state();
-    let tld = state.tld;
-    if !engine::brew_installed("dnsmasq") {
-        return Err("dnsmasq not installed. Install it first.".into());
-    }
-    // One privileged script: add dnsmasq mapping, (re)start it, write resolver.
-    let script = format!(
-        "grep -q 'address=/.{tld}/127.0.0.1' {brew}/etc/dnsmasq.conf || echo 'address=/.{tld}/127.0.0.1' >> {brew}/etc/dnsmasq.conf; \
-         {brew}/bin/brew services restart dnsmasq; \
-         mkdir -p /etc/resolver; \
-         echo 'nameserver 127.0.0.1' > /etc/resolver/{tld}",
-        tld = tld,
-        brew = brew
-    );
-    engine::run_privileged(&script)?;
-    Ok(format!("*.{tld} now resolves to 127.0.0.1"))
+pub async fn dns_setup() -> Result<String, String> {
+    run_blocking(move || {
+        let brew = engine::brew_prefix();
+        let state = engine::load_state();
+        let tld = state.tld;
+        if !engine::brew_installed("dnsmasq") {
+            // dnsmasq isn't part of the base install; fetch it on demand.
+            engine::run(&engine::brew_bin(), &["install", "dnsmasq"])?;
+        }
+        // One privileged script: add dnsmasq mapping, (re)start it, write resolver.
+        let script = format!(
+            "grep -q 'address=/.{tld}/127.0.0.1' {brew}/etc/dnsmasq.conf || echo 'address=/.{tld}/127.0.0.1' >> {brew}/etc/dnsmasq.conf; \
+             {brew}/bin/brew services restart dnsmasq; \
+             mkdir -p /etc/resolver; \
+             echo 'nameserver 127.0.0.1' > /etc/resolver/{tld}",
+            tld = tld,
+            brew = brew
+        );
+        engine::run_privileged(&script)?;
+        Ok(format!("*.{tld} now resolves to 127.0.0.1"))
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -249,10 +318,14 @@ fn random_hex(bytes: usize) -> String {
 }
 
 #[tauri::command]
-pub fn phpmyadmin_install(app: AppHandle) -> Result<String, String> {
+pub async fn phpmyadmin_install(app: AppHandle) -> Result<String, String> {
+    run_blocking(move || phpmyadmin_install_blocking(&app)).await
+}
+
+fn phpmyadmin_install_blocking(app: &AppHandle) -> Result<String, String> {
     let brew = engine::brew_prefix();
     if !engine::brew_installed("phpmyadmin") {
-        stream_shell(&app, &format!("{} install phpmyadmin", engine::brew_bin()))?;
+        stream_shell(app, &format!("{} install phpmyadmin", engine::brew_bin()))?;
     }
     let cfg = format!("{brew}/etc/phpmyadmin.config.inc.php");
 
@@ -342,15 +415,20 @@ pub fn open_editor(path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// First-run convenience: install PHP + MariaDB + Nginx + Apache + phpMyAdmin.
+/// First-run convenience: install ONLY the essentials —
+/// PHP (active version) + MariaDB + Nginx + phpMyAdmin. Apache and everything
+/// else stay optional (installed later on demand), so first-run stays small.
 #[tauri::command]
-pub fn install_everything(app: AppHandle) -> Result<String, String> {
-    let missing = services::base_missing_formulae();
-    if !missing.is_empty() {
-        stream_shell(&app, &format!("{} install {}", engine::brew_bin(), missing.join(" ")))?;
-    }
-    phpmyadmin_install(app)?;
-    Ok("Base stack + phpMyAdmin installed".into())
+pub async fn install_everything(app: AppHandle) -> Result<String, String> {
+    run_blocking(move || {
+        let missing = services::base_missing_formulae(); // php@active, mariadb, nginx
+        if !missing.is_empty() {
+            stream_shell(&app, &format!("{} install {}", engine::brew_bin(), missing.join(" ")))?;
+        }
+        phpmyadmin_install_blocking(&app)?;
+        Ok("Installed PHP + MariaDB + Nginx + phpMyAdmin".into())
+    })
+    .await
 }
 
 /// System sites (localhost + phpMyAdmin) — always present, non-deletable.
