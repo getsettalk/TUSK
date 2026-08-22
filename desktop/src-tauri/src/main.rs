@@ -26,6 +26,7 @@ fn main() {
             commands::install_base,
             commands::install_apache,
             commands::install_everything,
+            commands::first_run_setup,
             commands::mariadb_dev_reset_root,
             // php
             commands::php_list,

@@ -2,7 +2,7 @@
 
 <img src="docs/assets/logo.png" alt="Tusk" width="128" height="128" />
 
-#  · Tusk
+# Tusk
 
 ### The free, open-source local dev environment for macOS — PHP · MySQL · Nginx/Apache · phpMyAdmin, in one small app
 

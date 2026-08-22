@@ -460,6 +460,76 @@ pub async fn install_everything(app: AppHandle) -> Result<String, String> {
     .await
 }
 
+/// One-click first-run: pick a PHP version, then download + install + configure
+/// + start EVERYTHING, in the right order so pma.test works immediately.
+/// The user never has to open Settings.
+#[tauri::command]
+pub async fn first_run_setup(app: AppHandle, version: String) -> Result<String, String> {
+    run_blocking(move || {
+        if !command_exists("brew") {
+            return Err(
+                "Homebrew is required. Install it first from https://brew.sh, then reopen Tusk."
+                    .into(),
+            );
+        }
+        // 1. Record the chosen PHP version so the base install fetches it.
+        let mut st = engine::load_state();
+        st.active_php = version.clone();
+        engine::save_state(&st)?;
+
+        // 2. Install base stack (php@version, mariadb, nginx) one-by-one.
+        let missing = services::base_missing_formulae();
+        let total = missing.len() + 3; // + phpMyAdmin, DNS, start
+        for (i, f) in missing.iter().enumerate() {
+            emit_status(&app, &format!("Installing {f} — step {}/{total}…", i + 1));
+            run_logged(&format!("{} install {}", engine::brew_bin(), f))?;
+        }
+
+        // 3. phpMyAdmin (curl download).
+        emit_status(&app, "Setting up phpMyAdmin…");
+        phpmyadmin_install_blocking(&app)?;
+
+        // 4. Pretty .test domains (needs one admin prompt).
+        emit_status(&app, "Setting up .test domains (enter your Mac password)…");
+        let brew = engine::brew_prefix();
+        let tld = engine::load_state().tld;
+        if !engine::brew_installed("dnsmasq") {
+            run_logged(&format!("{} install dnsmasq", engine::brew_bin()))?;
+        }
+        let dns_script = format!(
+            "grep -q 'address=/.{tld}/127.0.0.1' {brew}/etc/dnsmasq.conf || echo 'address=/.{tld}/127.0.0.1' >> {brew}/etc/dnsmasq.conf; \
+             {brew}/bin/brew services restart dnsmasq; mkdir -p /etc/resolver; echo 'nameserver 127.0.0.1' > /etc/resolver/{tld}",
+            tld = tld, brew = brew
+        );
+        let _ = engine::run_privileged(&dns_script);
+
+        // 5. Start services (this regenerates vhosts incl. pma, then starts
+        //    nginx on :80 — one more admin prompt).
+        emit_status(&app, "Starting services (enter your Mac password)…");
+        services::start_all()?;
+
+        // 6. Make MariaDB root usable by phpMyAdmin (blank password dev root).
+        emit_status(&app, "Configuring database…");
+        let _ = services::dev_reset_root();
+
+        // 7. Mark setup complete so the app opens straight to the dashboard next time.
+        let mut st = engine::load_state();
+        st.setup_done = true;
+        engine::save_state(&st)?;
+        Ok("Setup complete — http://localhost and http://pma.test are ready.".into())
+    })
+    .await
+}
+
+fn command_exists(cmd: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {cmd}"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// System sites (localhost + phpMyAdmin) — always present, non-deletable.
 #[tauri::command]
 pub fn system_sites() -> Vec<sites::Site> {

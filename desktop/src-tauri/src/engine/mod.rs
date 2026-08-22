@@ -214,6 +214,9 @@ pub struct State {
     pub active_php: String,
     /// TLD used for local sites (e.g. "test" -> myapp.test).
     pub tld: String,
+    /// Has the one-click first-run "Setup & Install" completed?
+    #[serde(default)]
+    pub setup_done: bool,
 }
 
 impl Default for State {
@@ -224,6 +227,7 @@ impl Default for State {
             http_port: 80,
             active_php: "8.2".into(),
             tld: "test".into(),
+            setup_done: false,
         }
     }
 }

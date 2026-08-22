@@ -74,19 +74,26 @@ its own license:
 These are provided by their projects under their own terms, with no warranty.
 Tusk itself comes with no warranty of any kind.`;
 
-async function maybeShowLicense() {
-  const state = await call("get_state").catch(() => null);
-  if (state && !state.license_accepted) {
-    $("#license-text").textContent = LICENSE;
-    $("#license-gate").classList.remove("hidden");
-  }
-}
+$("#license-text").textContent = LICENSE;
 $("#license-agree").addEventListener("change", (e) => { $("#license-continue").disabled = !e.target.checked; });
 $("#license-continue").addEventListener("click", async () => {
   await call("accept_license");
   $("#license-gate").classList.add("hidden");
-  toast("Welcome to Tusk");
+  $("#setup-screen").classList.remove("hidden");   // first run → one-click setup
 });
+
+// ---- first-run setup ------------------------------------------------------
+$("#setup-btn").addEventListener("click", async () => {
+  const version = $("#setup-php").value || "8.2";
+  try {
+    await withBusy(`Setting up Tusk with PHP ${version}…`, "first_run_setup", { version });
+    $("#setup-screen").classList.add("hidden");
+    showView("services");
+    toast("Setup complete — http://localhost & http://pma.test are ready");
+  } catch (_) { /* error toast already shown; user can retry */ }
+});
+$("#brew-link").addEventListener("click", (e) => { e.preventDefault(); call("open_url", { url: "https://brew.sh" }); });
+$("#gh-link").addEventListener("click", (e) => { e.preventDefault(); call("open_url", { url: "https://github.com/getsettalk/tusk" }); });
 
 // ---- services (default view) ---------------------------------------------
 async function renderServices() {
@@ -306,7 +313,12 @@ async function pollServices() {
   setTimeout(pollServices, 6000);
 }
 (async function init() {
-  await maybeShowLicense();
-  showView("services");
+  showView("services");                       // app renders behind any overlay
+  const state = await call("get_state").catch(() => null);
+  if (state && !state.license_accepted) {
+    $("#license-gate").classList.remove("hidden");     // step 1: accept terms
+  } else if (state && !state.setup_done) {
+    $("#setup-screen").classList.remove("hidden");     // step 2: one-click setup
+  }
   setTimeout(pollServices, 6000);
 })();
