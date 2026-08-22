@@ -45,6 +45,19 @@ pub fn state_file() -> PathBuf { chowk_home().join("desktop-state.json") }
 /// Default parent folder for new site document roots (~/Sites).
 pub fn www_dir() -> PathBuf { home().join("Sites") }
 
+/// Where phpMyAdmin lives, if installed: our curl-downloaded copy under
+/// ~/.chowk/apps/phpmyadmin takes precedence, else a Homebrew install.
+pub fn phpmyadmin_docroot() -> Option<String> {
+    let local = apps_dir().join("phpmyadmin");
+    if local.join("index.php").exists() {
+        return Some(local.display().to_string());
+    }
+    if brew_installed("phpmyadmin") {
+        return Some(format!("{}/share/phpmyadmin", brew_prefix()));
+    }
+    None
+}
+
 pub fn ensure_dirs() {
     for d in [etc_dir(), logs_dir(), run_dir(), apps_dir(), www_dir()] {
         let _ = fs::create_dir_all(d);

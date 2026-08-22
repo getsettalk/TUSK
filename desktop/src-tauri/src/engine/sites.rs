@@ -34,11 +34,8 @@ pub fn system_sites() -> Vec<Site> {
         name: "localhost".into(),
         docroot: apps_dir().join("dashboard").display().to_string(),
     }];
-    if brew_installed("phpmyadmin") {
-        v.push(Site {
-            name: "pma".into(),
-            docroot: format!("{}/share/phpmyadmin", brew_prefix()),
-        });
+    if let Some(pma) = phpmyadmin_docroot() {
+        v.push(Site { name: "pma".into(), docroot: pma });
     }
     v
 }
@@ -106,11 +103,8 @@ pub fn generate_vhosts(server: &str, port: u16, tld: &str) -> Result<(), String>
     // User sites + system sites (phpMyAdmin) — the latter are always present
     // when installed and can't be deleted by the user.
     let mut all = list();
-    if brew_installed("phpmyadmin") {
-        all.push(Site {
-            name: "pma".into(),
-            docroot: format!("{}/share/phpmyadmin", brew),
-        });
+    if let Some(pma) = phpmyadmin_docroot() {
+        all.push(Site { name: "pma".into(), docroot: pma });
     }
 
     for site in all {

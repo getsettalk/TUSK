@@ -3,85 +3,41 @@
 
 use crate::engine::{self, php, services, sites};
 use std::fs;
-use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::Command;
 use tauri::{AppHandle, Emitter};
 
-/// Run a shell command and stream its combined output to the frontend as
-/// "install-log" events (live terminal-style progress).
-///
-/// IMPORTANT: reads raw bytes and splits on BOTH `\n` and `\r`. brew/curl draw
-/// progress bars with carriage returns and NO newline; a naive line reader would
-/// buffer the entire download into one ever-growing String (this caused a
-/// multi-GB out-of-memory). Each emitted chunk is length-capped too.
-fn stream_shell(app: &AppHandle, script: &str) -> Result<(), String> {
-    let _ = app.emit("install-log", format!("$ {script}"));
-    let mut child = Command::new("sh")
+/// Emit a SINGLE coarse status line to the UI (e.g. "Installing php@8.2 — 1/4…").
+/// We deliberately DO NOT stream a command's stdout as events: brew/curl repaint
+/// a `\r` progress bar thousands of times per second, and turning each repaint
+/// into an IPC event ballooned memory to tens of GB (observed 33GB OOM). So the
+/// UI shows step-based progress + an elapsed timer instead of a live log.
+fn emit_status(app: &AppHandle, msg: &str) {
+    let _ = app.emit("install-log", msg.to_string());
+}
+
+fn install_log_path() -> String {
+    format!("{}/install.log", engine::logs_dir().display())
+}
+
+/// Run a shell command with ALL output redirected to a log FILE (on disk, not
+/// events). Bounded memory. The user can open the log from Settings if needed.
+fn run_logged(cmd: &str) -> Result<(), String> {
+    let log = install_log_path();
+    let full = format!("printf '\\n$ %s\\n' \"{cmd}\" >> '{log}'; {cmd} >> '{log}' 2>&1");
+    let status = Command::new("sh")
         .arg("-c")
-        .arg(format!("{script} 2>&1"))
-        // Keep Homebrew quiet & non-interactive so it can't stall or auto-update
-        // the whole tap (which itself can be a huge fetch).
+        .arg(full)
         .env("HOMEBREW_NO_AUTO_UPDATE", "1")
         .env("HOMEBREW_NO_ENV_HINTS", "1")
         .env("HOMEBREW_NO_INSTALL_CLEANUP", "1")
         .env("NONINTERACTIVE", "1")
-        .stdout(Stdio::piped())
-        .spawn()
+        .status()
         .map_err(|e| e.to_string())?;
-
-    if let Some(mut out) = child.stdout.take() {
-        let mut buf = [0u8; 8192];
-        let mut line: Vec<u8> = Vec::with_capacity(256);
-        // THROTTLE: emit at most ~5 lines/sec. brew/curl repaint a `\r` progress
-        // bar thousands of times per second; without this the IPC event queue
-        // balloons to tens of GB (observed 33GB OOM). Intermediate progress
-        // repaints are simply dropped — we only need a live-ish status line.
-        let mut last_emit = Instant::now();
-        loop {
-            match out.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    for &b in &buf[..n] {
-                        if b == b'\n' || b == b'\r' {
-                            if !line.is_empty() {
-                                if last_emit.elapsed().as_millis() >= 200 {
-                                    let s = String::from_utf8_lossy(&line).trim_end().to_string();
-                                    if !s.is_empty() {
-                                        let _ = app.emit("install-log", s);
-                                    }
-                                    last_emit = Instant::now();
-                                }
-                                line.clear();
-                            }
-                        } else {
-                            line.push(b);
-                            if line.len() > 2000 {
-                                line.clear(); // drop absurdly long lines entirely
-                            }
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        // Always emit the final line.
-        if !line.is_empty() {
-            let s = String::from_utf8_lossy(&line).trim_end().to_string();
-            if !s.is_empty() {
-                let _ = app.emit("install-log", s);
-            }
-        }
-    }
-
-    let status = child.wait().map_err(|e| e.to_string())?;
     if status.success() {
-        let _ = app.emit("install-log", "✓ done".to_string());
         Ok(())
     } else {
-        let _ = app.emit("install-log", "✗ failed (see output above)".to_string());
-        Err("command failed — see log".into())
+        Err(format!("command failed — see log: {log}"))
     }
 }
 
@@ -165,7 +121,8 @@ pub async fn install_service(app: AppHandle, key: String) -> Result<String, Stri
         if engine::brew_installed(&formula) {
             return Ok(format!("{formula} already installed"));
         }
-        stream_shell(&app, &format!("{} install {}", engine::brew_bin(), formula))?;
+        emit_status(&app, &format!("Installing {formula}…"));
+        run_logged(&format!("{} install {}", engine::brew_bin(), formula))?;
         Ok(format!("{formula} installed"))
     })
     .await
@@ -189,7 +146,11 @@ pub async fn install_base(app: AppHandle) -> Result<String, String> {
         if missing.is_empty() {
             return Ok("Base stack already installed".into());
         }
-        stream_shell(&app, &format!("{} install {}", engine::brew_bin(), missing.join(" ")))?;
+        let n = missing.len();
+        for (i, f) in missing.iter().enumerate() {
+            emit_status(&app, &format!("Installing {f} — {}/{n}…", i + 1));
+            run_logged(&format!("{} install {}", engine::brew_bin(), f))?;
+        }
         Ok("Base stack installed".into())
     })
     .await
@@ -200,7 +161,8 @@ pub async fn install_apache(app: AppHandle) -> Result<String, String> {
         if engine::brew_installed("httpd") {
             return Ok("Apache already installed".into());
         }
-        stream_shell(&app, &format!("{} install httpd", engine::brew_bin()))?;
+        emit_status(&app, "Installing Apache (httpd)…");
+        run_logged(&format!("{} install httpd", engine::brew_bin()))?;
         Ok("Apache installed".into())
     })
     .await
@@ -224,7 +186,8 @@ pub async fn php_install(app: AppHandle, version: String) -> Result<String, Stri
         if php::is_installed(&version) {
             return Ok(format!("php@{version} already installed"));
         }
-        stream_shell(&app, &format!("{} install php@{}", engine::brew_bin(), version))?;
+        emit_status(&app, &format!("Downloading php@{version}…"));
+        run_logged(&format!("{} install php@{}", engine::brew_bin(), version))?;
         Ok(format!("php@{version} installed"))
     })
     .await
@@ -256,12 +219,14 @@ pub async fn php_install_extension(app: AppHandle, version: String, name: String
         };
         for d in deps {
             if !engine::brew_installed(d) {
-                stream_shell(&app, &format!("{} install {}", engine::brew_bin(), d))?;
+                emit_status(&app, &format!("Installing dependency {d}…"));
+                run_logged(&format!("{} install {}", engine::brew_bin(), d))?;
             }
         }
-        // Stream the (slow) PECL build.
+        // Build the (slow) PECL extension — output to the log file, not events.
+        emit_status(&app, &format!("Building {name} (PECL)…"));
         let pecl = php::pecl_bin(&version);
-        let _ = stream_shell(&app, &format!("yes '' | '{}' install '{}'", pecl, name));
+        let _ = run_logged(&format!("yes '' | '{}' install '{}'", pecl, name));
         // enable_installed_extension verifies the .so built before enabling.
         php::enable_installed_extension(&version, &name)
     })
@@ -335,14 +300,40 @@ pub async fn phpmyadmin_install(app: AppHandle) -> Result<String, String> {
 }
 
 fn phpmyadmin_install_blocking(app: &AppHandle) -> Result<String, String> {
-    let brew = engine::brew_prefix();
-    if !engine::brew_installed("phpmyadmin") {
-        stream_shell(app, &format!("{} install phpmyadmin", engine::brew_bin()))?;
-    }
-    let cfg = format!("{brew}/etc/phpmyadmin.config.inc.php");
+    engine::ensure_dirs();
+    let dir = engine::apps_dir().join("phpmyadmin");
 
-    // Always (re)write a working dev config: filled blowfish secret, TCP host,
-    // AllowNoPassword so the blank-password dev root works.
+    // Download the official package directly with curl (light, ~5MB, and — unlike
+    // `brew install phpmyadmin` — pulls NO extra PHP dependency).
+    if !dir.join("index.php").exists() {
+        emit_status(app, "Downloading phpMyAdmin…");
+        let tmp = engine::apps_dir().join("pma-download.tar.xz");
+        let url = "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-english.tar.xz";
+        run_logged(&format!(
+            "curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -o '{}' '{}'",
+            tmp.display(), url
+        ))?;
+        emit_status(app, "Extracting phpMyAdmin…");
+        let stage = engine::apps_dir().join("pma-stage");
+        let _ = fs::remove_dir_all(&stage);
+        fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+        run_logged(&format!("tar -xf '{}' -C '{}'", tmp.display(), stage.display()))?;
+        // The archive has a single top-level phpMyAdmin-* directory.
+        let extracted = fs::read_dir(&stage)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.is_dir()
+                && p.file_name().map(|n| n.to_string_lossy().starts_with("phpMyAdmin")).unwrap_or(false))
+            .ok_or_else(|| "phpMyAdmin folder not found in archive".to_string())?;
+        let _ = fs::remove_dir_all(&dir);
+        fs::rename(&extracted, &dir).map_err(|e| e.to_string())?;
+        let _ = fs::remove_dir_all(&stage);
+        let _ = fs::remove_file(&tmp);
+    }
+
+    // Dev config: filled blowfish secret, TCP host, AllowNoPassword so the
+    // blank-password dev root works.
     let secret = random_hex(16);
     let body = format!(
         "<?php\n\
@@ -357,12 +348,12 @@ fn phpmyadmin_install_blocking(app: &AppHandle) -> Result<String, String> {
          $cfg['SaveDir'] = '';\n",
         secret = secret
     );
-    fs::write(&cfg, body).map_err(|e| e.to_string())?;
+    fs::write(dir.join("config.inc.php"), body).map_err(|e| e.to_string())?;
 
     // pma is a system site: regenerate vhosts so it appears on next web start.
     let st = engine::load_state();
     let _ = sites::generate_vhosts(&st.web_server, st.http_port, &st.tld);
-    Ok("phpMyAdmin ready at pma.test (login root, blank password). Restart the web server if it was running.".into())
+    Ok("phpMyAdmin ready at pma.test (login root, blank password). Start/restart the web server.".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +425,12 @@ pub fn open_editor(path: String) -> Result<(), String> {
 pub async fn install_everything(app: AppHandle) -> Result<String, String> {
     run_blocking(move || {
         let missing = services::base_missing_formulae(); // php@active, mariadb, nginx
-        if !missing.is_empty() {
-            stream_shell(&app, &format!("{} install {}", engine::brew_bin(), missing.join(" ")))?;
+        let total = missing.len() + 1; // + phpMyAdmin
+        for (i, f) in missing.iter().enumerate() {
+            emit_status(&app, &format!("Installing {f} — {}/{total}…", i + 1));
+            run_logged(&format!("{} install {}", engine::brew_bin(), f))?;
         }
+        emit_status(&app, &format!("Setting up phpMyAdmin — {total}/{total}…"));
         phpmyadmin_install_blocking(&app)?;
         Ok("Installed PHP + MariaDB + Nginx + phpMyAdmin".into())
     })
