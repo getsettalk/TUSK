@@ -502,20 +502,27 @@ pub async fn first_run_setup(app: AppHandle, version: String) -> Result<String, 
         );
         let _ = engine::run_privileged(&dns_script);
 
-        // 5. Start services (this regenerates vhosts incl. pma, then starts
-        //    nginx on :80 — one more admin prompt).
+        // 5. Start services (regenerates vhosts incl. pma, then starts nginx on
+        //    :80 — one more admin prompt). NON-FATAL: the stack is installed, so
+        //    even if starting hits a snag (cancelled password, port busy) we must
+        //    NOT trap the user on the setup screen — they can Start all in-app.
         emit_status(&app, "Starting services (enter your Mac password)…");
-        services::start_all()?;
+        let started = services::start_all().is_ok();
 
         // 6. Make MariaDB root usable by phpMyAdmin (blank password dev root).
         emit_status(&app, "Configuring database…");
         let _ = services::dev_reset_root();
 
-        // 7. Mark setup complete so the app opens straight to the dashboard next time.
+        // 7. Mark setup complete so the app opens straight to the dashboard.
         let mut st = engine::load_state();
         st.setup_done = true;
         engine::save_state(&st)?;
-        Ok("Setup complete — http://localhost and http://pma.test are ready.".into())
+
+        Ok(if started {
+            "Setup complete — http://localhost and http://pma.test are ready.".into()
+        } else {
+            "Installed. Couldn't auto-start services — open the app and press ‘Start all’.".to_string()
+        })
     })
     .await
 }

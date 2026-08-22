@@ -87,10 +87,15 @@ $("#setup-btn").addEventListener("click", async () => {
   const version = $("#setup-php").value || "8.2";
   try {
     await withBusy(`Setting up Tusk with PHP ${version}…`, "first_run_setup", { version });
+  } catch (_) { /* error toast already shown */ }
+  // Leave the setup screen as soon as setup is marked done (even if a later
+  // step like auto-start had a hiccup) — never trap the user here.
+  const st = await call("get_state").catch(() => null);
+  if (st && st.setup_done) {
     $("#setup-screen").classList.add("hidden");
     showView("services");
-    toast("Setup complete — http://localhost & http://pma.test are ready");
-  } catch (_) { /* error toast already shown; user can retry */ }
+    renderServices();
+  }
 });
 $("#brew-link").addEventListener("click", (e) => { e.preventDefault(); call("open_url", { url: "https://brew.sh" }); });
 $("#gh-link").addEventListener("click", (e) => { e.preventDefault(); call("open_url", { url: "https://github.com/getsettalk/tusk" }); });
