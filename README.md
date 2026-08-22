@@ -47,15 +47,27 @@ stack on macOS for free** by orchestrating components you install through
 
 ## Install
 
-1. Download the latest **`Tusk_x.y.z_aarch64.dmg`** from
-   [Releases](https://github.com/getsettalk/tusk/releases).
-2. Open the `.dmg` and drag **Tusk** to `/Applications`.
-3. Launch it, then **Settings → Install everything** and **Services → Start all**.
+**Recommended — one line** (downloads the latest release into /Applications and
+avoids the unsigned-app "damaged" Gatekeeper error):
 
-> First launch on an unsigned build: right-click the app → **Open** (macOS
-> Gatekeeper), or *System Settings → Privacy & Security → Open Anyway*.
+```bash
+curl -fsSL https://raw.githubusercontent.com/getsettalk/tusk/main/install.sh | bash
+```
 
-**Requirements:** macOS + [Homebrew](https://brew.sh).
+Then open **Tusk**, accept the terms, and click **⚡ Setup & Install** (pick PHP 8.2).
+
+<details>
+<summary>Manual download instead</summary>
+
+1. Download **`Tusk_x.y.z_aarch64.dmg`** from [Releases](https://github.com/getsettalk/tusk/releases), open it, drag **Tusk** to `/Applications`.
+2. Because the app isn't Apple-notarized, macOS shows *"Tusk is damaged"*. Clear the download quarantine once:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Tusk.app
+   ```
+3. Open Tusk.
+</details>
+
+**Requirements:** macOS (Apple Silicon) + [Homebrew](https://brew.sh).
 
 ## Usage
 
