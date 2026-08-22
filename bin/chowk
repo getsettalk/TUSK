@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# chowk — a free, open-source local dev environment for macOS.
+# PHP (multi-version) + MariaDB + Nginx + phpMyAdmin, orchestrated over Homebrew.
+set -euo pipefail
+
+CHOWK_VERSION="0.1.0"
+
+# Resolve the real location of this script (follow symlinks) so lib/ + templates/ load.
+_src="${BASH_SOURCE[0]}"
+while [[ -h "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+CHOWK_BIN_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
+CHOWK_LIB_DIR="$CHOWK_BIN_DIR/../lib"
+
+# shellcheck source=/dev/null
+source "$CHOWK_LIB_DIR/common.sh"
+source "$CHOWK_LIB_DIR/doctor.sh"
+source "$CHOWK_LIB_DIR/install.sh"
+source "$CHOWK_LIB_DIR/services.sh"
+source "$CHOWK_LIB_DIR/php.sh"
+source "$CHOWK_LIB_DIR/site.sh"
+source "$CHOWK_LIB_DIR/dns.sh"
+source "$CHOWK_LIB_DIR/pma.sh"
+
+usage() {
+  cat <<EOF
+${C_BOLD}Chowk${C_RESET} v$CHOWK_VERSION — free local dev environment for macOS
+${C_DIM}PHP + MariaDB + Nginx + phpMyAdmin, all Homebrew-orchestrated.${C_RESET}
+
+${C_BOLD}Usage:${C_RESET} chowk <command> [args]
+
+${C_BOLD}Setup${C_RESET}
+  install                Install php@8.2, php@8.3, mariadb, nginx, dnsmasq
+  doctor                 Check environment health
+  dns setup              Make *.${CHOWK_TLD:-test} resolve to 127.0.0.1 (one-time, sudo)
+
+${C_BOLD}Services${C_RESET}
+  start | stop | restart Start/stop nginx + php-fpm + mariadb
+  status                 Show what's running
+
+${C_BOLD}PHP${C_RESET}
+  php list               List PHP versions + which is active
+  php use <ver>          Switch active PHP (e.g. chowk php use 8.2)
+
+${C_BOLD}Sites${C_RESET}
+  site add <name> [dir]  Create http://<name>.${CHOWK_TLD:-test}
+  site list              List sites
+  site remove <name>     Remove a site (files kept)
+
+${C_BOLD}Tools${C_RESET}
+  phpmyadmin install     Install phpMyAdmin at http://pma.${CHOWK_TLD:-test}
+  version | help
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    install)          cmd_install "$@";;
+    doctor)           cmd_doctor "$@";;
+    dns)              cmd_dns "$@";;
+    start)            cmd_start "$@";;
+    stop)             cmd_stop "$@";;
+    restart)          cmd_restart "$@";;
+    status)           cmd_status "$@";;
+    php)              cmd_php "$@";;
+    site)             cmd_site "$@";;
+    phpmyadmin|pma)   cmd_phpmyadmin "$@";;
+    version|--version|-v) echo "chowk $CHOWK_VERSION";;
+    help|--help|-h)   usage;;
+    *) error "Unknown command: $cmd"; echo; usage; exit 1;;
+  esac
+}
+
+main "$@"

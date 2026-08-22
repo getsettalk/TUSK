@@ -1,0 +1,15 @@
+# Rust / Tauri build output
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# Node (Tauri CLI devDependency)
+node_modules/
+
+# Preview / scratch
+desktop/ui/_preview.html
+
+# macOS
+.DS_Store
+
+# Note: Cargo.lock IS committed (this is an app, not a library) for
+# reproducible builds.
