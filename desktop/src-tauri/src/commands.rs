@@ -3,7 +3,6 @@
 
 use crate::engine::{self, php, services, sites};
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::AppHandle;
@@ -466,7 +465,7 @@ pub async fn install_everything(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub async fn first_run_setup(app: AppHandle, version: String) -> Result<String, String> {
     run_blocking(move || {
-        if !command_exists("brew") {
+        if !engine::brew_present() {
             return Err(
                 "Homebrew is required. Install it first from https://brew.sh, then reopen Tusk."
                     .into(),
@@ -521,14 +520,6 @@ pub async fn first_run_setup(app: AppHandle, version: String) -> Result<String, 
     .await
 }
 
-fn command_exists(cmd: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {cmd}"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 /// System sites (localhost + phpMyAdmin) — always present, non-deletable.
 #[tauri::command]

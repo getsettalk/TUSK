@@ -69,10 +69,25 @@ pub fn ensure_dirs() {
 // ---------------------------------------------------------------------------
 
 /// Resolve the Homebrew prefix (/opt/homebrew on Apple Silicon, /usr/local on Intel).
+/// IMPORTANT: a GUI app launched from Finder does NOT inherit the shell PATH, so
+/// `brew` isn't found via PATH. Probe the known install locations by absolute
+/// path first; only fall back to PATH lookup.
 pub fn brew_prefix() -> String {
+    for p in ["/opt/homebrew", "/usr/local"] {
+        if std::path::Path::new(&format!("{p}/bin/brew")).exists() {
+            return p.to_string();
+        }
+    }
     run("brew", &["--prefix"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "/opt/homebrew".to_string())
+}
+
+/// Is Homebrew installed? Checks the brew binary by absolute path (PATH-safe
+/// for GUI apps).
+pub fn brew_present() -> bool {
+    std::path::Path::new("/opt/homebrew/bin/brew").exists()
+        || std::path::Path::new("/usr/local/bin/brew").exists()
 }
 
 pub fn brew_bin() -> String {
