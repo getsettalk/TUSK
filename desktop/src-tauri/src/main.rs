@@ -19,6 +19,7 @@ fn main() {
             commands::list_services,
             commands::set_service,
             commands::install_service,
+            commands::install_status,
             commands::svc_start,
             commands::svc_stop,
             commands::svc_restart,

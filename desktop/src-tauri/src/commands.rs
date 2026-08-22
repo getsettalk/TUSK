@@ -5,15 +5,30 @@ use crate::engine::{self, php, services, sites};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::{AppHandle, Emitter};
+use std::sync::Mutex;
+use tauri::AppHandle;
+
+/// Current install/download step. The frontend POLLS this via `install_status`.
+/// We deliberately do NOT push Tauri events for progress: the JS-side
+/// `event.listen` leaked memory unboundedly in this wry/WebKit build (grew to
+/// ~2GB within a minute, and to 33GB during a long install → OOM). Polling a
+/// plain command is leak-free (verified).
+static INSTALL_STATUS: Mutex<String> = Mutex::new(String::new());
+
+#[tauri::command]
+pub fn install_status() -> String {
+    INSTALL_STATUS.lock().map(|s| s.clone()).unwrap_or_default()
+}
 
 /// Emit a SINGLE coarse status line to the UI (e.g. "Installing php@8.2 — 1/4…").
 /// We deliberately DO NOT stream a command's stdout as events: brew/curl repaint
 /// a `\r` progress bar thousands of times per second, and turning each repaint
 /// into an IPC event ballooned memory to tens of GB (observed 33GB OOM). So the
 /// UI shows step-based progress + an elapsed timer instead of a live log.
-fn emit_status(app: &AppHandle, msg: &str) {
-    let _ = app.emit("install-log", msg.to_string());
+fn emit_status(_app: &AppHandle, msg: &str) {
+    if let Ok(mut s) = INSTALL_STATUS.lock() {
+        *s = msg.to_string();
+    }
 }
 
 fn install_log_path() -> String {
@@ -98,8 +113,11 @@ pub fn svc_status() -> services::Status {
     services::status()
 }
 #[tauri::command]
-pub fn list_services() -> Vec<services::Service> {
-    services::list_services()
+pub async fn list_services() -> Vec<services::Service> {
+    // Off the main thread so its brew calls never freeze the UI.
+    tauri::async_runtime::spawn_blocking(services::list_services)
+        .await
+        .unwrap_or_default()
 }
 #[tauri::command]
 pub async fn set_service(key: String, on: bool) -> Result<String, String> {
@@ -288,10 +306,15 @@ pub async fn dns_setup() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 fn random_hex(bytes: usize) -> String {
-    // 16 bytes -> 32 hex chars, enough for phpMyAdmin's blowfish_secret.
-    let raw = fs::read(PathBuf::from("/dev/urandom")).unwrap_or_default();
-    let slice: Vec<u8> = raw.into_iter().take(bytes).collect();
-    slice.iter().map(|b| format!("{:02x}", b)).collect()
+    // Read EXACTLY `bytes` bytes from /dev/urandom. NEVER use fs::read() here —
+    // /dev/urandom is an endless stream, so fs::read() reads until it exhausts
+    // memory (this was the real cause of the multi-GB / 41GB OOM crash).
+    use std::io::Read;
+    let mut buf = vec![0u8; bytes];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut buf);
+    }
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 #[tauri::command]

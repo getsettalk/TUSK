@@ -24,23 +24,23 @@ function busy(msg) {
   $("#busy-status").textContent = "";
   _busySecs = 0; $("#busy-elapsed").textContent = "0s elapsed";
   clearInterval(_busyTimer);
-  _busyTimer = setInterval(() => { _busySecs++; $("#busy-elapsed").textContent = _busySecs + "s elapsed"; }, 1000);
+  // One 1s timer drives the elapsed counter AND polls the current step from the
+  // backend. We POLL (not Tauri events) because event.listen leaks memory in
+  // this wry/WebKit build.
+  _busyTimer = setInterval(async () => {
+    _busySecs++; $("#busy-elapsed").textContent = _busySecs + "s elapsed";
+    try {
+      const s = await invoke("install_status");
+      if (s) $("#busy-status").textContent = String(s).slice(0, 200);
+    } catch (_) {}
+  }, 1000);
   $("#busy").classList.remove("hidden");
 }
 function idle() { clearInterval(_busyTimer); $("#busy").classList.add("hidden"); }
-function busyLog(line) {
-  // Only ever show the single most-recent line — constant memory.
-  const s = String(line || "").slice(0, 200);
-  if (s) $("#busy-status").textContent = s;
-}
 async function withBusy(msg, cmd, args) {
   busy(msg);
   try { const r = await call(cmd, args); toast(typeof r === "string" && r ? r : "Done"); return r; }
   finally { idle(); }
-}
-// Stream the latest install/download status line from the backend.
-if (TAURI && TAURI.event && TAURI.event.listen) {
-  TAURI.event.listen("install-log", (e) => busyLog(e.payload));
 }
 
 // ---- navigation -----------------------------------------------------------
@@ -297,8 +297,16 @@ $("#btn-open-logs").addEventListener("click", async () => call("open_folder", { 
 $("#btn-open-htdocs").addEventListener("click", async () => call("open_folder", { path: await call("sites_root_path") }));
 
 // ---- boot -----------------------------------------------------------------
+// Self-scheduling poll: waits for each refresh to FINISH before scheduling the
+// next (a plain setInterval could stack overlapping refreshes and run away).
+async function pollServices() {
+  if (currentView === "services" && !document.hidden) {
+    try { await renderServices(); } catch (_) {}
+  }
+  setTimeout(pollServices, 6000);
+}
 (async function init() {
   await maybeShowLicense();
   showView("services");
-  setInterval(() => { if (currentView === "services") renderServices(); }, 5000);
+  setTimeout(pollServices, 6000);
 })();

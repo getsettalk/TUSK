@@ -106,6 +106,37 @@ pub fn brew_service_running(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// ONE `brew list --versions` -> map of installed formula -> version.
+/// Lets callers avoid spawning a separate brew process per formula (that
+/// per-service spawning, polled every few seconds, caused a runaway).
+pub fn brew_versions_map() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    if let Ok(out) = run(&brew_bin(), &["list", "--versions"]) {
+        for line in out.lines() {
+            let mut it = line.split_whitespace();
+            if let Some(name) = it.next() {
+                m.insert(name.to_string(), it.next().unwrap_or("").to_string());
+            }
+        }
+    }
+    m
+}
+
+/// ONE `brew services list` -> set of started service names.
+pub fn brew_started_set() -> std::collections::HashSet<String> {
+    let mut s = std::collections::HashSet::new();
+    if let Ok(out) = run(&brew_bin(), &["services", "list"]) {
+        for line in out.lines() {
+            if line.contains("started") {
+                if let Some(name) = line.split_whitespace().next() {
+                    s.insert(name.to_string());
+                }
+            }
+        }
+    }
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Command runners
 // ---------------------------------------------------------------------------

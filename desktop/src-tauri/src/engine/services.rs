@@ -317,62 +317,57 @@ pub struct Service {
 /// The list of services shown in the dashboard, each independently toggleable.
 pub fn list_services() -> Vec<Service> {
     let state = load_state();
-    let mut out = Vec::new();
+    // Take ONE snapshot each instead of spawning a brew process per service.
+    let vers = brew_versions_map();
+    let started = brew_started_set();
+    let inst = |f: &str| vers.contains_key(f);
+    let ver = |f: &str| vers.get(f).cloned().unwrap_or_default();
 
-    // Web server (nginx or apache)
     let web_formula = if state.web_server == "apache" { "httpd" } else { "nginx" };
-    out.push(Service {
-        key: "web".into(),
-        label: if state.web_server == "apache" { "Apache".into() } else { "Nginx".into() },
-        version: brew_version(web_formula),
-        installed: brew_installed(web_formula),
-        running: web_running(&state.web_server),
-        port: state.http_port.to_string(),
-    });
+    let php_formula = format!("php@{}", state.active_php);
 
-    // PHP (php-fpm)
-    out.push(Service {
-        key: "php".into(),
-        label: format!("PHP {}", state.active_php),
-        version: brew_version(&format!("php@{}", state.active_php)),
-        installed: php::is_installed(&state.active_php),
-        running: pid_alive(&run_dir().join("php-fpm.pid")),
-        port: "fpm".into(),
-    });
-
-    // MariaDB (MySQL-compatible)
-    out.push(Service {
-        key: "mariadb".into(),
-        label: "MySQL (MariaDB)".into(),
-        version: brew_version("mariadb"),
-        installed: brew_installed("mariadb"),
-        running: mariadb_running(),
-        port: "3306".into(),
-    });
-
-    // Redis (optional — shown even if not installed, with an Install action)
-    let redis_installed = brew_installed("redis");
-    out.push(Service {
-        key: "redis".into(),
-        label: "Redis".into(),
-        version: brew_version("redis"),
-        installed: redis_installed,
-        running: redis_installed && brew_service_running("redis"),
-        port: "6379".into(),
-    });
-
-    // Mailpit (optional)
-    let mailpit_installed = brew_installed("mailpit");
-    out.push(Service {
-        key: "mailpit".into(),
-        label: "Mailpit".into(),
-        version: brew_version("mailpit"),
-        installed: mailpit_installed,
-        running: mailpit_installed && brew_service_running("mailpit"),
-        port: "8025".into(),
-    });
-
-    out
+    vec![
+        Service {
+            key: "web".into(),
+            label: if state.web_server == "apache" { "Apache".into() } else { "Nginx".into() },
+            version: ver(web_formula),
+            installed: inst(web_formula),
+            running: web_running(&state.web_server),
+            port: state.http_port.to_string(),
+        },
+        Service {
+            key: "php".into(),
+            label: format!("PHP {}", state.active_php),
+            version: ver(&php_formula),
+            installed: inst(&php_formula),
+            running: pid_alive(&run_dir().join("php-fpm.pid")),
+            port: "fpm".into(),
+        },
+        Service {
+            key: "mariadb".into(),
+            label: "MySQL (MariaDB)".into(),
+            version: ver("mariadb"),
+            installed: inst("mariadb"),
+            running: started.contains("mariadb"),
+            port: "3306".into(),
+        },
+        Service {
+            key: "redis".into(),
+            label: "Redis".into(),
+            version: ver("redis"),
+            installed: inst("redis"),
+            running: started.contains("redis"),
+            port: "6379".into(),
+        },
+        Service {
+            key: "mailpit".into(),
+            label: "Mailpit".into(),
+            version: ver("mailpit"),
+            installed: inst("mailpit"),
+            running: started.contains("mailpit"),
+            port: "8025".into(),
+        },
+    ]
 }
 
 
