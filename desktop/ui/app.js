@@ -15,29 +15,32 @@ async function call(cmd, args) {
   catch (e) { toast(typeof e === "string" ? e : JSON.stringify(e), "err"); throw e; }
 }
 
-// Full-screen spinner + live log for long operations (installs/downloads).
+// Full-screen progress overlay for long operations (installs/downloads).
+// Shows an animated bar + elapsed timer + the LATEST status line only — no
+// growing log box (that + a flood of events previously blew up memory).
+let _busyTimer = null, _busySecs = 0;
 function busy(msg) {
   $("#busy-msg").textContent = msg || "Working…";
-  const el = $("#busy-log"); el.textContent = ""; el._lines = [];
+  $("#busy-status").textContent = "";
+  _busySecs = 0; $("#busy-elapsed").textContent = "0s elapsed";
+  clearInterval(_busyTimer);
+  _busyTimer = setInterval(() => { _busySecs++; $("#busy-elapsed").textContent = _busySecs + "s elapsed"; }, 1000);
   $("#busy").classList.remove("hidden");
 }
-function idle() { $("#busy").classList.add("hidden"); }
+function idle() { clearInterval(_busyTimer); $("#busy").classList.add("hidden"); }
 function busyLog(line) {
-  const el = $("#busy-log");
-  el._lines = el._lines || [];
-  el._lines.push(line);
-  if (el._lines.length > 400) el._lines = el._lines.slice(-400); // keep memory bounded
-  el.textContent = el._lines.join("\n");
-  el.scrollTop = el.scrollHeight;
+  // Only ever show the single most-recent line — constant memory.
+  const s = String(line || "").slice(0, 200);
+  if (s) $("#busy-status").textContent = s;
 }
 async function withBusy(msg, cmd, args) {
   busy(msg);
   try { const r = await call(cmd, args); toast(typeof r === "string" && r ? r : "Done"); return r; }
   finally { idle(); }
 }
-// Stream live install/download output from the backend into the busy log.
-if (TAURI && TAURI.event) {
-  TAURI.event.listen("install-log", (e) => busyLog(String(e.payload)));
+// Stream the latest install/download status line from the backend.
+if (TAURI && TAURI.event && TAURI.event.listen) {
+  TAURI.event.listen("install-log", (e) => busyLog(e.payload));
 }
 
 // ---- navigation -----------------------------------------------------------

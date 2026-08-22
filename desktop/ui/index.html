@@ -145,11 +145,13 @@
     <footer class="statusbar" id="statusbar"></footer>
   </div>
 
-  <!-- Busy overlay for long operations (installs) with live terminal log -->
+  <!-- Busy overlay for long operations (installs): clean progress, no log flood -->
   <div id="busy" class="busy hidden">
     <div class="busy-card">
       <div class="busy-head"><div class="spinner"></div><div id="busy-msg">Working…</div></div>
-      <pre id="busy-log" class="busy-log"></pre>
+      <div class="progress"><div class="progress-bar"></div></div>
+      <div id="busy-status" class="muted tiny mono"></div>
+      <div id="busy-elapsed" class="muted tiny"></div>
       <div class="muted tiny">Downloading/building via Homebrew — this can take a few minutes.</div>
     </div>
   </div>

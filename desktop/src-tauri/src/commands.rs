@@ -6,6 +6,7 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
 /// Run a shell command and stream its combined output to the frontend as
@@ -31,28 +32,33 @@ fn stream_shell(app: &AppHandle, script: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     if let Some(mut out) = child.stdout.take() {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 8192];
         let mut line: Vec<u8> = Vec::with_capacity(256);
-        let flush = |line: &mut Vec<u8>, app: &AppHandle| {
-            if !line.is_empty() {
-                let s = String::from_utf8_lossy(line).trim_end().to_string();
-                if !s.is_empty() {
-                    let _ = app.emit("install-log", s);
-                }
-                line.clear();
-            }
-        };
+        // THROTTLE: emit at most ~5 lines/sec. brew/curl repaint a `\r` progress
+        // bar thousands of times per second; without this the IPC event queue
+        // balloons to tens of GB (observed 33GB OOM). Intermediate progress
+        // repaints are simply dropped — we only need a live-ish status line.
+        let mut last_emit = Instant::now();
         loop {
             match out.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     for &b in &buf[..n] {
                         if b == b'\n' || b == b'\r' {
-                            flush(&mut line, app);
+                            if !line.is_empty() {
+                                if last_emit.elapsed().as_millis() >= 200 {
+                                    let s = String::from_utf8_lossy(&line).trim_end().to_string();
+                                    if !s.is_empty() {
+                                        let _ = app.emit("install-log", s);
+                                    }
+                                    last_emit = Instant::now();
+                                }
+                                line.clear();
+                            }
                         } else {
                             line.push(b);
                             if line.len() > 2000 {
-                                flush(&mut line, app); // cap absurdly long lines
+                                line.clear(); // drop absurdly long lines entirely
                             }
                         }
                     }
@@ -60,7 +66,13 @@ fn stream_shell(app: &AppHandle, script: &str) -> Result<(), String> {
                 Err(_) => break,
             }
         }
-        flush(&mut line, app);
+        // Always emit the final line.
+        if !line.is_empty() {
+            let s = String::from_utf8_lossy(&line).trim_end().to_string();
+            if !s.is_empty() {
+                let _ = app.emit("install-log", s);
+            }
+        }
     }
 
     let status = child.wait().map_err(|e| e.to_string())?;
