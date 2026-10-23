@@ -5,6 +5,7 @@ use crate::engine::{self, php, services, sites};
 use std::fs;
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 /// Current install/download step. The frontend POLLS this via `install_status`.
@@ -53,6 +54,29 @@ fn run_logged(cmd: &str) -> Result<(), String> {
     } else {
         Err(format!("command failed — see log: {log}"))
     }
+}
+
+/// When Homebrew's package list was last refreshed by Tusk (this session).
+static BREW_REFRESHED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Refresh Homebrew's package list before installing/upgrading, so Tusk always
+/// gets the newest patch (e.g. a PHP security fix) instead of a stale one.
+/// Runs at most every 30 min unless `force`; the mutex serializes concurrent
+/// callers so two `brew update`s never race. Best-effort when offline.
+fn ensure_brew_fresh(app: &AppHandle, force: bool) {
+    emit_status(app, "Checking Homebrew for the latest versions…");
+    let mut last = BREW_REFRESHED.lock().unwrap_or_else(|e| e.into_inner());
+    if !force {
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(1800) {
+                return;
+            }
+        }
+    }
+    emit_status(app, "Updating Homebrew package list…");
+    let _ = run_logged(&format!("{} update", engine::brew_bin()));
+    *last = Some(Instant::now());
+    php::invalidate_catalog();
 }
 
 /// Run blocking work off the UI thread (Tauri sync commands run on the main
@@ -138,6 +162,7 @@ pub async fn install_service(app: AppHandle, key: String) -> Result<String, Stri
         if engine::brew_installed(&formula) {
             return Ok(format!("{formula} already installed"));
         }
+        ensure_brew_fresh(&app, false);
         emit_status(&app, &format!("Installing {formula}…"));
         run_logged(&format!("{} install {}", engine::brew_bin(), formula))?;
         Ok(format!("{formula} installed"))
@@ -163,6 +188,7 @@ pub async fn install_base(app: AppHandle) -> Result<String, String> {
         if missing.is_empty() {
             return Ok("Base stack already installed".into());
         }
+        ensure_brew_fresh(&app, false);
         let n = missing.len();
         for (i, f) in missing.iter().enumerate() {
             emit_status(&app, &format!("Installing {f} — {}/{n}…", i + 1));
@@ -178,6 +204,7 @@ pub async fn install_apache(app: AppHandle) -> Result<String, String> {
         if engine::brew_installed("httpd") {
             return Ok("Apache already installed".into());
         }
+        ensure_brew_fresh(&app, false);
         emit_status(&app, "Installing Apache (httpd)…");
         run_logged(&format!("{} install httpd", engine::brew_bin()))?;
         Ok("Apache installed".into())
@@ -194,8 +221,39 @@ pub async fn mariadb_dev_reset_root() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn php_list() -> Vec<php::PhpVersion> {
-    php::list()
+pub async fn php_list() -> Vec<php::PhpVersion> {
+    // Off the main thread: building the catalog queries Homebrew.
+    tauri::async_runtime::spawn_blocking(php::list)
+        .await
+        .unwrap_or_default()
+}
+/// Refresh Homebrew's package list, then return the PHP list with
+/// `update_available` flags. `force` = always refresh (manual "Check" button);
+/// otherwise at most every 30 min (silent check at app start).
+#[tauri::command]
+pub async fn php_check_updates(app: AppHandle, force: bool) -> Result<Vec<php::PhpVersion>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_brew_fresh(&app, force);
+        php::list()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+/// Upgrade an installed PHP branch to its newest patch (e.g. a security fix),
+/// then relink + restart php-fpm if it's the active version.
+#[tauri::command]
+pub async fn php_upgrade(app: AppHandle, version: String) -> Result<String, String> {
+    run_blocking(move || {
+        if !php::is_installed(&version) {
+            return Err(format!("php@{version} is not installed"));
+        }
+        ensure_brew_fresh(&app, false);
+        emit_status(&app, &format!("Updating php@{version} to the latest patch…"));
+        run_logged(&format!("{} upgrade php@{}", engine::brew_bin(), version))?;
+        emit_status(&app, "Restarting PHP…");
+        php::after_upgrade(&version)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn php_install(app: AppHandle, version: String) -> Result<String, String> {
@@ -203,6 +261,7 @@ pub async fn php_install(app: AppHandle, version: String) -> Result<String, Stri
         if php::is_installed(&version) {
             return Ok(format!("php@{version} already installed"));
         }
+        ensure_brew_fresh(&app, false);
         emit_status(&app, &format!("Downloading php@{version}…"));
         run_logged(&format!("{} install php@{}", engine::brew_bin(), version))?;
         Ok(format!("php@{version} installed"))
@@ -236,6 +295,7 @@ pub async fn php_install_extension(app: AppHandle, version: String, name: String
         };
         for d in deps {
             if !engine::brew_installed(d) {
+                ensure_brew_fresh(&app, false);
                 emit_status(&app, &format!("Installing dependency {d}…"));
                 run_logged(&format!("{} install {}", engine::brew_bin(), d))?;
             }
@@ -446,6 +506,7 @@ pub fn open_editor(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn install_everything(app: AppHandle) -> Result<String, String> {
     run_blocking(move || {
+        ensure_brew_fresh(&app, false);
         let missing = services::base_missing_formulae(); // php@active, mariadb, nginx
         let total = missing.len() + 1; // + phpMyAdmin
         for (i, f) in missing.iter().enumerate() {
@@ -476,7 +537,9 @@ pub async fn first_run_setup(app: AppHandle, version: String) -> Result<String, 
         st.active_php = version.clone();
         engine::save_state(&st)?;
 
-        // 2. Install base stack (php@version, mariadb, nginx) one-by-one.
+        // 2. Refresh Homebrew so we install the newest (patched) versions, then
+        //    install the base stack (php@version, mariadb, nginx) one-by-one.
+        ensure_brew_fresh(&app, false);
         let missing = services::base_missing_formulae();
         let total = missing.len() + 3; // + phpMyAdmin, DNS, start
         for (i, f) in missing.iter().enumerate() {

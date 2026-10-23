@@ -19,10 +19,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// PHP versions Tusk knows how to install via Homebrew, newest first.
-/// This list is the source for the "install a new version" dropdown; adding a
-/// future release here is all that's needed to offer it.
-pub const AVAILABLE_PHP: &[&str] = &["8.4", "8.3", "8.2", "8.1", "8.0", "7.4"];
+/// Fallback PHP branches if Homebrew can't be queried. The real list is built
+/// dynamically from Homebrew (see `php::catalog`), so new releases show up
+/// without changing code.
+pub const FALLBACK_PHP: &[&str] = &["8.5", "8.4", "8.3", "8.2"];
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -103,23 +103,6 @@ pub fn brew_installed(formula: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Installed version of a Homebrew formula, e.g. "1.27.3" (empty if absent).
-pub fn brew_version(formula: &str) -> String {
-    run(&brew_bin(), &["list", "--versions", formula])
-        .ok()
-        .and_then(|s| s.split_whitespace().nth(1).map(|v| v.to_string()))
-        .unwrap_or_default()
-}
-
-/// Is a brew *service* currently started?
-pub fn brew_service_running(name: &str) -> bool {
-    run(&brew_bin(), &["services", "list"])
-        .map(|s| {
-            s.lines()
-                .any(|l| l.starts_with(name) && l.contains("started"))
-        })
-        .unwrap_or(false)
-}
 
 /// ONE `brew list --versions` -> map of installed formula -> version.
 /// Lets callers avoid spawning a separate brew process per formula (that

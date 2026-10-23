@@ -7,7 +7,9 @@
 use super::*;
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Serialize, Clone)]
 pub struct PhpVersion {
@@ -16,6 +18,108 @@ pub struct PhpVersion {
     pub active: bool,
     /// Full "8.3.33" if installed, else empty.
     pub full: String,
+    /// Newest patch Homebrew offers for this branch, e.g. "8.3.36".
+    pub latest: String,
+    /// Installed but older than `latest` (e.g. a security patch is out).
+    pub update_available: bool,
+    /// Homebrew marks the branch deprecated (end of life).
+    pub eol: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Catalog: which PHP branches Homebrew offers right now
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct CatalogEntry {
+    version: String,
+    latest: String,
+    eol: bool,
+}
+
+static CATALOG: Mutex<Option<(Instant, Vec<CatalogEntry>)>> = Mutex::new(None);
+const CATALOG_TTL: Duration = Duration::from_secs(600);
+
+/// Forget the cached catalog (call after `brew update` / upgrades).
+pub fn invalidate_catalog() {
+    if let Ok(mut c) = CATALOG.lock() {
+        *c = None;
+    }
+}
+
+/// Every PHP branch Homebrew can install, newest first. Built from
+/// `brew formulae` (php@X.Y) plus the unversioned `php` formula, which is
+/// always the newest branch — so a new PHP release appears here automatically.
+fn catalog() -> Vec<CatalogEntry> {
+    if let Ok(c) = CATALOG.lock() {
+        if let Some((at, list)) = c.as_ref() {
+            if at.elapsed() < CATALOG_TTL {
+                return list.clone();
+            }
+        }
+    }
+
+    let mut names: Vec<String> = run(&brew_bin(), &["formulae"])
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| {
+            l.strip_prefix("php@")
+                .map(|v| v.split('.').count() == 2 && v.split('.').all(|p| p.parse::<u32>().is_ok()))
+                .unwrap_or(false)
+        })
+        .map(|l| l.to_string())
+        .collect();
+    names.push("php".into());
+
+    let mut args = vec!["info", "--json=v2"];
+    args.extend(names.iter().map(|s| s.as_str()));
+    let mut list: Vec<CatalogEntry> = Vec::new();
+    if let Ok(json) = run(&brew_bin(), &args) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+            for f in v["formulae"].as_array().into_iter().flatten() {
+                if f["disabled"].as_bool().unwrap_or(false) {
+                    continue; // can't be installed anymore
+                }
+                let name = f["name"].as_str().unwrap_or_default();
+                let latest = f["versions"]["stable"].as_str().unwrap_or_default().to_string();
+                let version = match name.strip_prefix("php@") {
+                    Some(v) => v.to_string(),
+                    None => latest.split('.').take(2).collect::<Vec<_>>().join("."),
+                };
+                if version.is_empty() || list.iter().any(|e| e.version == version) {
+                    continue;
+                }
+                list.push(CatalogEntry {
+                    version,
+                    latest,
+                    eol: f["deprecated"].as_bool().unwrap_or(false),
+                });
+            }
+        }
+    }
+    if list.is_empty() {
+        list = FALLBACK_PHP
+            .iter()
+            .map(|v| CatalogEntry { version: v.to_string(), latest: String::new(), eol: false })
+            .collect();
+    }
+    list.sort_by(|a, b| version_cmp(&b.version, &a.version));
+
+    if let Ok(mut c) = CATALOG.lock() {
+        *c = Some((Instant::now(), list.clone()));
+    }
+    list
+}
+
+/// All installable branch versions, newest first.
+pub fn available_versions() -> Vec<String> {
+    catalog().into_iter().map(|e| e.version).collect()
+}
+
+/// Compare dotted numeric versions ("8.2.35" vs "8.2.9").
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| -> Vec<u32> { s.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    parse(a).cmp(&parse(b))
 }
 
 #[derive(Serialize, Clone)]
@@ -26,11 +130,28 @@ pub struct Extension {
     pub builtin: bool,
 }
 
+/// Install prefix for a branch. Usually `opt/php@X.Y`; the newest branch is the
+/// unversioned `php` formula, so fall back to `opt/php` when it matches.
+fn php_opt(version: &str) -> String {
+    let brew = brew_prefix();
+    let versioned = format!("{brew}/opt/php@{version}");
+    if Path::new(&versioned).exists() {
+        return versioned;
+    }
+    let plain = format!("{brew}/opt/php");
+    if let Ok(target) = fs::read_link(&plain) {
+        if target.to_string_lossy().contains(&format!("/php/{version}.")) {
+            return plain;
+        }
+    }
+    versioned
+}
+
 pub fn php_bin(version: &str) -> String {
-    format!("{}/opt/php@{}/bin/php", brew_prefix(), version)
+    format!("{}/bin/php", php_opt(version))
 }
 pub fn php_fpm_bin(version: &str) -> String {
-    format!("{}/opt/php@{}/sbin/php-fpm", brew_prefix(), version)
+    format!("{}/sbin/php-fpm", php_opt(version))
 }
 pub fn php_ini_dir(version: &str) -> String {
     format!("{}/etc/php/{}", brew_prefix(), version)
@@ -50,18 +171,32 @@ fn full_version(version: &str) -> String {
         .to_string()
 }
 
-/// List every version Tusk knows about, marking installed/active.
+/// List every branch Homebrew offers, marking installed/active and whether a
+/// newer patch (e.g. a security fix) is available for installed ones.
 pub fn list() -> Vec<PhpVersion> {
     let active = load_state().active_php;
-    AVAILABLE_PHP
-        .iter()
-        .map(|v| {
-            let installed = is_installed(v);
+    let mut entries = catalog();
+    // Keep an installed active branch visible even if Homebrew dropped it.
+    if !entries.iter().any(|e| e.version == active) && is_installed(&active) {
+        entries.push(CatalogEntry { version: active.clone(), latest: String::new(), eol: true });
+    }
+    entries
+        .into_iter()
+        .map(|e| {
+            let installed = is_installed(&e.version);
+            let full = if installed { full_version(&e.version) } else { String::new() };
+            let update_available = installed
+                && !full.is_empty()
+                && !e.latest.is_empty()
+                && version_cmp(&e.latest, &full).is_gt();
             PhpVersion {
-                version: v.to_string(),
+                active: e.version == active,
+                version: e.version,
                 installed,
-                active: *v == active,
-                full: if installed { full_version(v) } else { String::new() },
+                full,
+                latest: e.latest,
+                update_available,
+                eol: e.eol,
             }
         })
         .collect()
@@ -100,7 +235,7 @@ pub fn switch(version: &str) -> Result<String, String> {
 fn relink_cli(active: &str) {
     // Unlink the unversioned formula and every versioned one first.
     let _ = run(&brew_bin(), &["unlink", "php"]);
-    for v in AVAILABLE_PHP {
+    for v in available_versions() {
         let _ = run(&brew_bin(), &["unlink", &format!("php@{v}")]);
     }
     // php@X.Y are keg-only, so force + overwrite are required to link them.
@@ -108,6 +243,20 @@ fn relink_cli(active: &str) {
         &brew_bin(),
         &["link", "--overwrite", "--force", &format!("php@{active}")],
     );
+}
+
+/// After `brew upgrade php@X`: refresh the catalog, and if this branch is the
+/// active one, relink the CLI and restart php-fpm so the patched binary is what
+/// actually serves requests.
+pub fn after_upgrade(version: &str) -> Result<String, String> {
+    invalidate_catalog();
+    if load_state().active_php == version {
+        relink_cli(version);
+        if pid_alive(&run_dir().join("php-fpm.pid")) {
+            services::restart_php_fpm(version)?;
+        }
+    }
+    Ok(format!("php@{version} updated to {}", full_version(version)))
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +319,7 @@ pub fn extensions(version: &str) -> Result<Vec<Extension>, String> {
 
 /// PECL binary path for a version (used by the streaming command layer).
 pub fn pecl_bin(version: &str) -> String {
-    format!("{}/opt/php@{}/bin/pecl", brew_prefix(), version)
+    format!("{}/bin/pecl", php_opt(version))
 }
 
 /// After a PECL build, write the conf.d ini and reload php-fpm. Split out so

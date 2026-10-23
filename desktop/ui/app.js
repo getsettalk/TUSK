@@ -144,20 +144,27 @@ $("#q-folder").addEventListener("click", async () => { call("open_folder", { pat
 $("#q-terminal").addEventListener("click", async () => { call("open_terminal", { path: await call("sites_root_path") }); });
 
 // ---- PHP ------------------------------------------------------------------
-async function renderPhp() {
-  const versions = await call("php_list");
+async function renderPhp(versions) {
+  versions = versions || await call("php_list");
+  renderUpdateBanner(versions);
   const el = $("#php-list"); el.innerHTML = "";
+  const newest = versions.length ? versions[0].version : "";
   for (const v of versions) {
-    const tag = v.active ? '<span class="tag active">active</span>'
+    let tags = v.active ? '<span class="tag active">active</span>'
       : v.installed ? '<span class="tag installed">installed</span>'
       : '<span class="tag missing">available</span>';
+    if (v.update_available) tags = `<span class="tag update">update ${v.latest}</span>` + tags;
+    if (v.eol) tags = '<span class="tag eol">EOL</span>' + tags;
     let btns = "";
+    if (v.update_available) btns += `<button class="btn sm primary" data-act="upgrade" data-v="${v.version}">Update</button>`;
     if (v.installed && !v.active) btns += `<button class="btn sm" data-act="switch" data-v="${v.version}">Use</button>`;
     if (v.installed) btns += `<button class="btn sm danger" data-act="uninstall" data-v="${v.version}">✕</button>`;
     if (!v.installed) btns += `<button class="btn sm primary" data-act="install" data-v="${v.version}">Install</button>`;
+    const sub = v.installed ? v.full : (v.latest ? `latest ${v.latest}` : "&nbsp;");
+    const label = `php@${v.version}${v.version === newest ? " · latest" : ""}`;
     const item = document.createElement("div");
     item.className = "item";
-    item.innerHTML = `<div class="grow"><div class="main">php@${v.version}</div><div class="sub">${v.full || "&nbsp;"}</div></div>${tag}<div class="item-btns">${btns}</div>`;
+    item.innerHTML = `<div class="grow"><div class="main">${label}</div><div class="sub">${sub}</div></div>${tags}<div class="item-btns">${btns}</div>`;
     el.appendChild(item);
   }
   el.querySelectorAll("button").forEach((b) => b.addEventListener("click", async () => {
@@ -166,8 +173,35 @@ async function renderPhp() {
       if (act === "switch") { await call("php_switch", { version: v }); toast(`php@${v} is now the default`); }
       if (act === "install") await withBusy(`Installing php@${v}…`, "php_install", { version: v });
       if (act === "uninstall") await withBusy(`Removing php@${v}…`, "php_uninstall", { version: v });
+      if (act === "upgrade") await withBusy(`Updating php@${v}…`, "php_upgrade", { version: v });
     } finally { renderPhp(); }
   }));
+}
+$("#php-check-btn").addEventListener("click", async () => {
+  try {
+    const versions = await withBusy("Checking for PHP updates…", "php_check_updates", { force: true });
+    renderPhp(versions);
+    const n = versions.filter((v) => v.update_available).length;
+    toast(n ? `${n} PHP update(s) available` : "All installed PHP versions are up to date");
+  } catch (_) {}
+});
+
+// Services-tab banner when an installed PHP has a newer patch (security fixes).
+function renderUpdateBanner(versions) {
+  const banner = $("#php-update-banner");
+  const outdated = (versions || []).filter((v) => v.update_available);
+  if (!outdated.length) { banner.classList.add("hidden"); banner.innerHTML = ""; return; }
+  const list = outdated.map((v) => `PHP ${v.full} → ${v.latest}`).join(", ");
+  banner.innerHTML = `<span class="grow">⚠ Update available: ${list}. Patch releases often include security fixes.</span>
+    <button class="btn sm primary" id="banner-update">Update</button>`;
+  banner.classList.remove("hidden");
+  $("#banner-update").addEventListener("click", async () => {
+    for (const v of outdated) {
+      try { await withBusy(`Updating php@${v.version}…`, "php_upgrade", { version: v.version }); } catch (_) { break; }
+    }
+    renderUpdateBanner(await call("php_list"));
+    renderServices();
+  });
 }
 
 // ---- Sites ----------------------------------------------------------------
@@ -317,13 +351,33 @@ async function pollServices() {
   }
   setTimeout(pollServices, 6000);
 }
+// Fill the setup dropdown with every PHP branch Homebrew offers (newest first),
+// keeping 8.2 as the default selection.
+async function fillSetupVersions() {
+  try {
+    const versions = (await invoke("php_list")).filter((v) => !v.eol);
+    if (!versions.length) return;
+    const sel = $("#setup-php");
+    sel.innerHTML = versions.map((v, i) => {
+      const note = v.version === "8.2" ? "  (recommended)" : i === 0 ? "  (latest)" : "";
+      return `<option value="${v.version}"${v.version === "8.2" ? " selected" : ""}>PHP ${v.version}${note}</option>`;
+    }).join("");
+  } catch (_) { /* keep the static fallback options */ }
+}
+
 (async function init() {
   showView("services");                       // app renders behind any overlay
   const state = await call("get_state").catch(() => null);
   if (state && !state.license_accepted) {
     $("#license-gate").classList.remove("hidden");     // step 1: accept terms
+    fillSetupVersions();
   } else if (state && !state.setup_done) {
     $("#setup-screen").classList.remove("hidden");     // step 2: one-click setup
+    fillSetupVersions();
+  } else {
+    // Silent background check: refresh Homebrew and flag outdated PHP
+    // (e.g. a security patch) with a banner on the Services tab.
+    invoke("php_check_updates", { force: false }).then(renderUpdateBanner).catch(() => {});
   }
   setTimeout(pollServices, 6000);
 })();

@@ -33,8 +33,12 @@ stack on macOS for free** by orchestrating components you install through
 
 ## Features
 
-- 🐘 **Multiple PHP versions** — install/switch 7.4 → 8.4 in one click; switches the
+- 🐘 **Multiple PHP versions** — every branch Homebrew offers (8.1 → 8.5 today; new
+  releases appear automatically). Install/switch in one click; switches the
   terminal `php` **and** the web server together.
+- 🔒 **Security updates** — Tusk checks for newer PHP patch releases and shows an
+  **Update** banner (one click upgrades + restarts PHP). Installs always fetch the
+  latest patch.
 - 🟢 **Per-service control** — start/stop Nginx/Apache, PHP-FPM, MySQL, Redis, Mailpit
   individually, or all at once.
 - 🔀 **Nginx or Apache** — pick your web server; site configs are generated for you.

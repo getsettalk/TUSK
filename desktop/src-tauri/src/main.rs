@@ -30,6 +30,8 @@ fn main() {
             commands::mariadb_dev_reset_root,
             // php
             commands::php_list,
+            commands::php_check_updates,
+            commands::php_upgrade,
             commands::php_install,
             commands::php_uninstall,
             commands::php_switch,
