@@ -20,13 +20,18 @@ That's it — Tusk installs everything else for you.
 
 ## 2. Install & first run
 
-1. Open **Tusk.app** (drag it to `/Applications` from the `.dmg`).
+1. Install with one line (puts the latest Tusk in `/Applications` and opens it):
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/getsettalk/tusk/main/install.sh | bash
+   ```
 2. Accept the licenses on first launch.
-3. Go to **Settings → Install everything**. This downloads and installs
-   PHP + MariaDB + Nginx + Apache + phpMyAdmin via Homebrew. A live log shows
-   progress (it can take a few minutes the first time).
-4. Go to **Services → Start all**. On port 80 macOS will ask for your password
-   once (needed to run the web server on the standard port).
+3. On the **Welcome** screen pick a PHP version (8.2 is the default) and press
+   **⚡ Setup & Install**. Tusk installs PHP, MariaDB, Nginx and phpMyAdmin via
+   Homebrew, sets up `.test` domains and starts everything. macOS asks for your
+   password once or twice (for port 80 and `.test` domains). It can take a few
+   minutes the first time; progress is shown on screen.
+4. Apache is optional — choose it later in **Settings** and install it from
+   **Services**.
 
 Open **http://localhost** — you should see the Tusk dashboard.
 
@@ -45,8 +50,12 @@ button**:
 The status bar at the bottom shows how many services are running.
 
 ### PHP
-- Lists every PHP version Tusk knows about.
-- **Install** downloads a version via Homebrew (live log).
+- Lists every PHP version Homebrew offers (newest first; new releases appear
+  automatically). End-of-life versions are marked **EOL**.
+- **Install** downloads a version via Homebrew (always the latest patch).
+- **Update** appears next to an installed version when a newer patch is out
+  (often a security fix). **Check for updates** checks right away; Tusk also
+  checks each time it opens and shows an update banner on the Services tab.
 - **Use** makes a version the default — this switches **both** the web server
   **and** the terminal `php` command (Tusk relinks Homebrew for you).
 - **✕** removes a version.

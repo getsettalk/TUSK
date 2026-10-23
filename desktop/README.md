@@ -1,6 +1,6 @@
-# Chowk Desktop (Tauri GUI)
+# Tusk Desktop (Tauri GUI)
 
-A native macOS app for Chowk — manage PHP versions, MariaDB, Nginx/Apache,
+A native macOS app for Tusk — manage PHP versions, MariaDB, Nginx/Apache,
 sites, extensions and phpMyAdmin from one window. Built with **Tauri v2**
 (Rust backend + a dependency-light static HTML/CSS/JS frontend).
 
