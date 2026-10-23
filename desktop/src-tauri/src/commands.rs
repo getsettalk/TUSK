@@ -250,6 +250,8 @@ pub async fn php_upgrade(app: AppHandle, version: String) -> Result<String, Stri
         ensure_brew_fresh(&app, false);
         emit_status(&app, &format!("Updating php@{version} to the latest patch…"));
         run_logged(&format!("{} upgrade php@{}", engine::brew_bin(), version))?;
+        // Remove the old (possibly vulnerable) keg; best-effort.
+        let _ = run_logged(&format!("{} cleanup php@{}", engine::brew_bin(), version));
         emit_status(&app, "Restarting PHP…");
         php::after_upgrade(&version)
     })

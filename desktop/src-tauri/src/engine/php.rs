@@ -47,9 +47,11 @@ pub fn invalidate_catalog() {
     }
 }
 
-/// Every PHP branch Homebrew can install, newest first. Built from
-/// `brew formulae` (php@X.Y) plus the unversioned `php` formula, which is
-/// always the newest branch — so a new PHP release appears here automatically.
+/// Every PHP branch Homebrew can install, newest first. The unversioned `php`
+/// formula is always the newest branch, and its `versioned_formulae` lists the
+/// older ones (php@8.4, php@8.3, ...), so new PHP releases appear automatically.
+/// (We don't use `brew formulae`: launched from the app it intermittently
+/// printed an empty list, which hid available updates.)
 fn catalog() -> Vec<CatalogEntry> {
     if let Ok(c) = CATALOG.lock() {
         if let Some((at, list)) = c.as_ref() {
@@ -59,43 +61,45 @@ fn catalog() -> Vec<CatalogEntry> {
         }
     }
 
-    let mut names: Vec<String> = run(&brew_bin(), &["formulae"])
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| {
-            l.strip_prefix("php@")
-                .map(|v| v.split('.').count() == 2 && v.split('.').all(|p| p.parse::<u32>().is_ok()))
-                .unwrap_or(false)
-        })
-        .map(|l| l.to_string())
-        .collect();
-    names.push("php".into());
+    let brew = brew_bin();
+    let info = |names: &[String]| -> Vec<serde_json::Value> {
+        let mut args = vec!["info", "--json=v2"];
+        args.extend(names.iter().map(|s| s.as_str()));
+        run(&brew, &args)
+            .ok()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+            .and_then(|v| v["formulae"].as_array().cloned())
+            .unwrap_or_default()
+    };
+    let mut formulae = info(&["php".to_string()]);
+    let versioned: Vec<String> = formulae
+        .first()
+        .and_then(|f| f["versioned_formulae"].as_array())
+        .map(|a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if !versioned.is_empty() {
+        formulae.extend(info(&versioned));
+    }
 
-    let mut args = vec!["info", "--json=v2"];
-    args.extend(names.iter().map(|s| s.as_str()));
     let mut list: Vec<CatalogEntry> = Vec::new();
-    if let Ok(json) = run(&brew_bin(), &args) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
-            for f in v["formulae"].as_array().into_iter().flatten() {
-                if f["disabled"].as_bool().unwrap_or(false) {
-                    continue; // can't be installed anymore
-                }
-                let name = f["name"].as_str().unwrap_or_default();
-                let latest = f["versions"]["stable"].as_str().unwrap_or_default().to_string();
-                let version = match name.strip_prefix("php@") {
-                    Some(v) => v.to_string(),
-                    None => latest.split('.').take(2).collect::<Vec<_>>().join("."),
-                };
-                if version.is_empty() || list.iter().any(|e| e.version == version) {
-                    continue;
-                }
-                list.push(CatalogEntry {
-                    version,
-                    latest,
-                    eol: f["deprecated"].as_bool().unwrap_or(false),
-                });
-            }
+    for f in &formulae {
+        if f["disabled"].as_bool().unwrap_or(false) {
+            continue; // can't be installed anymore
         }
+        let name = f["name"].as_str().unwrap_or_default();
+        let latest = f["versions"]["stable"].as_str().unwrap_or_default().to_string();
+        let version = match name.strip_prefix("php@") {
+            Some(v) => v.to_string(),
+            None => latest.split('.').take(2).collect::<Vec<_>>().join("."),
+        };
+        if version.is_empty() || list.iter().any(|e| e.version == version) {
+            continue;
+        }
+        list.push(CatalogEntry {
+            version,
+            latest,
+            eol: f["deprecated"].as_bool().unwrap_or(false),
+        });
     }
     if list.is_empty() {
         list = FALLBACK_PHP
