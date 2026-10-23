@@ -4,10 +4,22 @@
 mod commands;
 mod engine;
 
+use tauri::Manager;
+
 fn main() {
     engine::ensure_dirs();
 
     tauri::Builder::default()
+        // Only one Tusk at a time: two copies would fight over the same services,
+        // php-fpm pid and Homebrew. A second launch just brings the existing
+        // window to the front. Must be the first plugin registered.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             // state / settings
             commands::get_state,
